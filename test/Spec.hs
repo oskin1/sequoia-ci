@@ -7,11 +7,11 @@ import qualified RIO.Map as Map
 import qualified RIO.NonEmpty.Partial as NonEmpty.Partial
 import qualified Runner
 import qualified System.Process.Typed as Process
-import Test.Hspec (beforeAll, describe, hspec, it, shouldBe)
+import Test.Hspec (beforeAll, describe, hspec, it, shouldBe, runIO)
 
 main :: IO ()
 main = hspec do
-  let docker = Docker.makeService
+  docker <- runIO Docker.makeService
   let runner = Runner.makeService docker
   beforeAll cleanupDocker $ describe "Sequoia CI" do
     it "should run a build (success)" do

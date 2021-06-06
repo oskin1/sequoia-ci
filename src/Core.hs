@@ -1,10 +1,11 @@
 module Core where
 
-import Docker (createContainer, startContainer)
 import qualified Docker
 import RIO
 import qualified RIO.List as List
 import qualified RIO.Map as Map
+import qualified RIO.NonEmpty as NonEmpty
+import qualified RIO.Text as Text
 
 progress :: Docker.Service -> Build -> IO Build
 progress docker build =
@@ -13,10 +14,11 @@ progress docker build =
       case buildHasNextStep build of
         Left res -> pure build {state = BuildFinished res}
         Right step -> do
-          let opts = Docker.ContainerOptions $ image step
-          containerId <- createContainer docker opts
+          let script = Text.unlines $ ["set -ex"] <> NonEmpty.toList (commands step)
+          let opts = Docker.ContainerOptions (image step) script
+          containerId <- Docker.createContainer docker opts
           let s = BuildRunningState {step = name step, containerId = containerId}
-          startContainer docker containerId
+          Docker.startContainer docker containerId
           pure build {state = BuildRunning s}
     BuildRunning state ->
       Docker.containerStatus docker (containerId state) >>= \case

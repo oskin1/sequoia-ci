@@ -13,29 +13,35 @@ data Service = Service
     containerStatus :: ContainerId -> IO ContainerStatus
   }
 
-makeService :: Service
+makeService :: IO Service
 makeService =
-  Service
-    { createContainer = createContainer_,
-      startContainer = startContainer_,
-      containerStatus = undefined
-    }
+  Socket.makeManager "/var/run/docker.sock" <&> \manager ->
+    let makeReq path =
+          Http.defaultRequest
+            & Http.setRequestPath (encodeUtf8 $ dockerApiVersion <> path)
+            & Http.setRequestManager manager
+     in Service
+          { createContainer = createContainer_ makeReq,
+            startContainer = startContainer_ makeReq,
+            containerStatus = containerStatus_ makeReq
+          }
 
-createContainer_ :: ContainerOptions -> IO ContainerId
-createContainer_ opts = do
+dockerApiVersion = "/v1.41"
+
+createContainer_ :: MakeRequest -> ContainerOptions -> IO ContainerId
+createContainer_ makeReq opts = do
   manager <- Socket.makeManager "/var/run/docker.sock"
   let body =
         Json.object
           [ ("Image", Json.toJSON $ unImage $ image opts),
             ("Tty", Json.toJSON True),
             ("Labels", Json.object [("quad", "")]),
-            ("Cmd", "echo hello"),
-            ("Entrypoint", Json.toJSON [Json.String "/bin/sh", "-c"])
+            ("Entrypoint", Json.toJSON [Json.String "/bin/sh", "-c"]),
+            ("Cmd", "echo \"$QUAD_SCRIPT\" | /bin/sh"),
+            ("Env", Json.toJSON ["QUAD_SCRIPT=" <> script opts])
           ]
   let req =
-        Http.defaultRequest
-          & Http.setRequestManager manager
-          & Http.setRequestPath "/v1.41/containers/create"
+        makeReq "/containers/create"
           & Http.setRequestMethod "POST"
           & Http.setRequestBodyJSON body
   let parser = Json.withObject "create-container" \o -> fmap ContainerId (o .: "Id")
@@ -43,16 +49,27 @@ createContainer_ opts = do
   --traceShowIO res
   parseResponse res parser
 
-startContainer_ :: ContainerId -> IO ()
-startContainer_ container = do
-  manager <- Socket.makeManager "/var/run/docker.sock"
-  let path = "/v1.40/containers/" <> unContainerId container <> "/start"
-  let req =
-        Http.defaultRequest
-          & Http.setRequestManager manager
-          & Http.setRequestPath (encodeUtf8 path)
-          & Http.setRequestMethod "POST"
+startContainer_ :: MakeRequest -> ContainerId -> IO ()
+startContainer_ makeReq container =
   void $ Http.httpBS req
+  where
+    path = "/containers/" <> unContainerId container <> "/start"
+    req = makeReq path & Http.setRequestMethod "POST"
+
+containerStatus_ :: MakeRequest -> ContainerId -> IO ContainerStatus
+containerStatus_ makeReq container = do
+  let parser = Json.withObject "container-inspect" $ \o -> do
+        state <- o .: "State"
+        status <- state .: "Status"
+        case status of
+          "running" -> pure ContainerRunning
+          "exited" -> do
+            code <- state .: "ExitCode"
+            pure $ ContainerExited (ContainerExitCode code)
+          other -> pure $ ContainerOther other
+  let req = makeReq $ "/containers/" <> unContainerId container <> "/json"
+  res <- Http.httpBS req
+  parseResponse res parser
 
 parseResponse ::
   Http.Response ByteString ->
@@ -67,7 +84,12 @@ parseResponse resp parser =
       value <- Json.eitherDecodeStrict (Http.getResponseBody resp)
       Json.Types.parseEither parser value
 
-newtype ContainerOptions = ContainerOptions {image :: Image}
+type MakeRequest = Text -> Http.Request
+
+data ContainerOptions = ContainerOptions
+  { image :: Image,
+    script :: Text
+  }
   deriving (Eq, Show)
 
 newtype Image = Image {unImage :: Text}
